@@ -20,7 +20,7 @@ import io
 
 AVAILABLE_PACKAGES = "scanpy, scvi, CellTypist, anndata, matplotlib, numpy, seaborn, pandas, scipy"
 class AnalysisAgent:
-    def __init__(self, h5ad_path, paper_summary_path, openai_api_key, model_name, analysis_name, num_analyses=5, max_iterations=6, prompt_dir="prompts"):
+    def __init__(self, h5ad_path, paper_summary_path, openai_api_key, model_name, analysis_name, num_analyses=5, max_iterations=6, prompt_dir="prompts", openai_api_base=None, kernel_name='python3'):
         self.h5ad_path = h5ad_path
         self.paper_summary = open(paper_summary_path).read()
         self.openai_api_key = openai_api_key
@@ -29,6 +29,7 @@ class AnalysisAgent:
         self.max_iterations = max_iterations
         self.num_analyses = num_analyses
         self.prompt_dir = prompt_dir
+        self.kernel_name = kernel_name
         
         self.completed_analyses = []
         self.failed_analyses = []
@@ -36,7 +37,7 @@ class AnalysisAgent:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = os.path.join("outputs", f"{analysis_name}_{timestamp}")
         
-        self.client = openai.OpenAI(api_key=openai_api_key)
+        self.client = openai.OpenAI(api_key=openai_api_key, base_url=openai_api_base)
         
         # Initialize code memory to track the last few cells of code
         self.code_memory = []
@@ -63,7 +64,7 @@ class AnalysisAgent:
             f"max_iterations: {max_iterations}"
         )
         # Initialize notebook executor
-        self.executor = ExecutePreprocessor(timeout=600, kernel_name='python3')
+        self.executor = ExecutePreprocessor(timeout=600, kernel_name=self.kernel_name)
 
         # Load the .obs data from the anndata file
         if self.h5ad_path == "": # JUST FOR BENCHMARKING
@@ -175,13 +176,14 @@ class AnalysisAgent:
         
         self.logger.log_prompt("user", prompt, "Initial Analysis")
         
+        prompt = self.coding_system_prompt + "\n\n" + prompt
         response = self.client.chat.completions.create(
             model=self.model_name,
             messages=[
-                {"role": "system", "content": self.coding_system_prompt},
                 {"role": "user", "content": prompt}
             ],
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            temperature=0.6
         )
         result = response.choices[0].message.content
         
@@ -217,13 +219,14 @@ class AnalysisAgent:
                                paper_txt=self.paper_summary)
         
         
+        prompt = self.coding_system_prompt + "\n\n" + prompt
         response = self.client.chat.completions.create(
             model=self.model_name,
             messages=[
-                {"role": "system", "content": self.coding_system_prompt},
                 {"role": "user", "content": prompt}
             ],
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            temperature=0.6
         )
         result = response.choices[0].message.content
 
@@ -249,12 +252,13 @@ class AnalysisAgent:
                                CODING_GUIDELINES=self.coding_guidelines, adata_summary=self.adata_summary, past_analyses=past_analyses,
                                paper_txt=self.paper_summary, previous_code=recent_code)
 
+        prompt = "You are a single-cell bioinformatics expert providing feedback on code and analysis plan.\n\n" + prompt
         response = self.client.chat.completions.create(
             model=self.model_name,
             messages=[
-                {"role": "system", "content": "You are a single-cell bioinformatics expert providing feedback on code and analysis plan."},
                 {"role": "user", "content": prompt}
-            ]
+            ],
+            temperature=0.6
         )
         feedback = response.choices[0].message.content
         return feedback
@@ -278,13 +282,14 @@ class AnalysisAgent:
                                CODING_GUIDELINES=self.coding_guidelines, adata_summary=self.adata_summary,
                                feedback=feedback, previous_code=recent_code)
         
+        prompt = self.coding_system_prompt + "\n\n" + prompt
         response = self.client.chat.completions.create(
             model=self.model_name,
             messages=[
-                {"role": "system", "content": self.coding_system_prompt},
                 {"role": "user", "content": prompt}
             ],
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            temperature=0.6
         )
         modified_analysis = json.loads(response.choices[0].message.content)
 
@@ -311,12 +316,13 @@ class AnalysisAgent:
         You can only use the following packages: {AVAILABLE_PACKAGES}
         """
         
+        prompt = "You are a coding assistant helping to fix code.\n\n" + prompt
         response = self.client.chat.completions.create(
             model=self.model_name,
             messages=[
-                {"role": "system", "content": "You are a coding assistant helping to fix code."},
                 {"role": "user", "content": prompt}
-            ]
+            ],
+            temperature=0.6
         )
         fixed_code = response.choices[0].message.content
         
@@ -375,6 +381,9 @@ class AnalysisAgent:
         prompt = open(os.path.join(self.prompt_dir, "interp_results.txt")).read()
         prompt = prompt.format(text_output=text_output, paper_txt=self.paper_summary,
                                CODING_GUIDELINES=self.coding_guidelines, past_analyses=past_analyses)
+        
+        system_prompt = "You are a single-cell transcriptomics expert providing feedback on Python code and analysis plan."
+        prompt = system_prompt + "\n\n" + prompt
         user_content.append({"type": "text", "text": prompt})
 
         try:
@@ -399,11 +408,11 @@ class AnalysisAgent:
                     continue  # Skip this image and continue with others
                     
             response = self.client.chat.completions.create(
-                model = "gpt-4o",
+                model = "doubao-1-5-thinking-vision-pro-250428",
                 messages = [
-                    {"role": "system", "content": "You are a single-cell transcriptomics expert providing feedback on Python code and analysis plan."},
                     {"role": "user", "content": user_content}
-                ]
+                ],
+                temperature=0.6
             )
             feedback = response.choices[0].message.content
             
@@ -676,8 +685,9 @@ class AnalysisAgent:
         
         # Try o3-mini first
         response = self.client.responses.create(
-            model="gpt-4o",
-            input=prompt
+            model=self.model_name,
+            input=prompt,
+            temperature=0.6
         )
         new_code = response.output_text.strip()
         
@@ -856,6 +866,3 @@ print(f"Data loaded: {{adata.shape[0]}} cells and {{adata.shape[1]}} genes")
 def strip_code_markers(text):
     # Remove ```python, ``` and ```
     return re.sub(r'```python|```', '', text)
-
-
-    
